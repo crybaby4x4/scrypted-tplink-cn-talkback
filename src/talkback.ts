@@ -40,7 +40,7 @@ export class TalkbackSession {
 
     if (r1.includes('401')) {
       // Step 2: Digest auth required
-      const wwwAuth = r1.match(/WWW-Authenticate:\s*(.+)/i)?.[1] ?? '';
+      const wwwAuth = r1.match(/WWW-Authenticate:\s*Digest\s+(.+)/i)?.[1] ?? r1.match(/WWW-Authenticate:\s*(.+)/i)?.[1] ?? '';
       const { realm, nonce } = parseWwwAuthenticate(wwwAuth);
       if (!realm || !nonce) throw new Error('Failed to parse WWW-Authenticate challenge');
 

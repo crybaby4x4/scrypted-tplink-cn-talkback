@@ -90,7 +90,7 @@ async function testHandshake() {
 
   if (r1.includes('401')) {
     // Need digest auth
-    const wwwAuth = r1.match(/WWW-Authenticate:\s*(.+)/i)?.[1] ?? '';
+    const wwwAuth = r1.match(/WWW-Authenticate:\s*Digest\s+(.+)/i)?.[1] ?? r1.match(/WWW-Authenticate:\s*(.+)/i)?.[1] ?? '';
     const { realm, nonce } = parseWwwAuth(wwwAuth);
     console.log(`      realm="${realm}"  nonce="${nonce}"`);
     if (!realm || !nonce) {

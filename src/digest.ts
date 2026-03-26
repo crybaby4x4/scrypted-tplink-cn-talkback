@@ -18,7 +18,9 @@ export function computeDigestResponse(
 }
 
 export function parseWwwAuthenticate(header: string): { realm: string; nonce: string } {
-  const realm = header.match(/realm="([^"]+)"/)?.[1] ?? '';
-  const nonce = header.match(/nonce="([^"]+)"/)?.[1] ?? '';
+  // When multiple WWW-Authenticate headers exist (Basic + Digest), find the Digest line
+  const digestLine = header.split(/\r?\n/).find(l => /WWW-Authenticate:\s*Digest/i.test(l)) ?? header;
+  const realm = digestLine.match(/realm="([^"]+)"/)?.[1] ?? '';
+  const nonce = digestLine.match(/nonce="([^"]+)"/)?.[1] ?? '';
   return { realm, nonce };
 }
