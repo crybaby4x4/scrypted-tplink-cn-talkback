@@ -23,7 +23,7 @@ HomeKit / Scrypted UI
         │
         ├─── 视频流 ──▶ Scrypted ONVIF 插件 ──▶ 摄像头（直连）
         │
-        └─── 话筒 ────▶ TalkbackMixin（本插件）──▶ 摄像头 TCP:554（MULTITRANS 直连）
+        └─── 话筒 ────▶ TalkbackMixin（本插件）──▶ 摄像头 TCP（MULTITRANS 直连，默认 554）
 ```
 
 **各组件职责：**
@@ -62,6 +62,7 @@ HomeKit / Scrypted UI
    | 字段 | 说明 |
    |------|------|
    | Camera IP Address | 摄像头 IP，通常与 ONVIF 的 IP 相同 |
+   | RTSP Port | MULTITRANS 协议端口，默认 `554` |
    | Username | 摄像头登录用户名（通常为 `admin`） |
    | Password | 摄像头登录密码 |
 
@@ -81,7 +82,7 @@ HomeKit / Scrypted UI
 ```bash
 # 克隆项目
 git clone <repo>
-cd scrypted-tplink-ipc
+cd scrypted-tplink-cn-talkback
 
 # 安装依赖
 npm install
@@ -136,9 +137,6 @@ src/
 └── digest.ts     # HTTP Digest 认证工具
 test-talkback.mjs # 独立协议验证脚本
 ```
-
----
-
 
 ---
 
