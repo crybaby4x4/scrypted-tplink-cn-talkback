@@ -1,0 +1,6 @@
+src/
+test-talkback.mjs
+webpack.config.js
+tsconfig.json
+CLAUDE.md
+.github/
