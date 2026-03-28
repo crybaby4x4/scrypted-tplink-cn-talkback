@@ -8,7 +8,7 @@ import sdk, {
   SettingValue,
   WritableDeviceState,
 } from '@scrypted/sdk';
-import { TalkbackSession } from './talkback';
+import { DuplexMode, TalkbackSession } from './talkback';
 
 const { mediaManager } = sdk;
 
@@ -36,6 +36,10 @@ export class TalkbackMixin extends MixinDeviceBase<any> implements Intercom {
   get port(): number { return parseInt(this.storage.getItem('port') ?? '') || DEFAULT_PORT; }
   get username(): string { return this.storage.getItem('username') ?? 'admin'; }
   get password(): string { return this.storage.getItem('password') ?? ''; }
+  get duplexMode(): DuplexMode {
+    const val = this.storage.getItem('duplexMode');
+    return val === 'full_duplex' ? 'full_duplex' : 'half_duplex';
+  }
 
   // Intercom interface
   async startIntercom(media: MediaObject): Promise<void> {
@@ -52,7 +56,7 @@ export class TalkbackMixin extends MixinDeviceBase<any> implements Intercom {
     if (!inputArgs.length) throw new Error('No FFmpeg input arguments from media object');
 
     this.console.log('[talkback] startIntercom, target:', `${this.ip}:${this.port}`);
-    this.talkback = new TalkbackSession(this.ip, this.port, this.username, this.password, this.console);
+    this.talkback = new TalkbackSession(this.ip, this.port, this.username, this.password, this.duplexMode, this.console);
     await this.talkback.start(inputArgs);
   }
 
@@ -97,6 +101,14 @@ export class TalkbackMixin extends MixinDeviceBase<any> implements Intercom {
         group: 'TP-Link Talkback',
         title: 'Password',
         type: 'password',
+      },
+      {
+        key: 'talkback:duplexMode',
+        group: 'TP-Link Talkback',
+        title: 'Duplex Mode',
+        description: 'half_duplex: intercom style (default). full_duplex: simultaneous two-way audio',
+        value: this.duplexMode,
+        choices: ['half_duplex', 'full_duplex'],
       },
     ];
 

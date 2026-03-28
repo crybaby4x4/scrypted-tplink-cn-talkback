@@ -7,6 +7,8 @@ import { computeDigestResponse, parseWwwAuthenticate } from './digest';
 const EXCHANGE_TIMEOUT_MS = 8000;
 const FFMPEG_KILL_TIMEOUT_MS = 3000;
 
+export type DuplexMode = 'half_duplex' | 'full_duplex';
+
 export class TalkbackSession {
   private socket: net.Socket | undefined;
   private ffmpegProcess: ChildProcess | undefined;
@@ -18,11 +20,13 @@ export class TalkbackSession {
     private port: number,
     private username: string,
     private password: string,
+    private duplexMode: DuplexMode,
     private console: Console
   ) {}
 
   async start(ffmpegInputArgs: string[]): Promise<void> {
-    const uri = `rtsp://${this.ip}/multitrans`;
+    const host = this.port === 554 ? this.ip : `${this.ip}:${this.port}`;
+    const uri = `rtsp://${host}/multitrans`;
     const clientUuid = crypto.randomUUID();
 
     this.socket = new net.Socket();
@@ -70,13 +74,16 @@ export class TalkbackSession {
       throw new Error(`Unexpected response: ${r1.split('\r\n')[0]}`);
     }
 
+    if (!sessionId) {
+      this.console.warn('[talkback] no session ID in response, continuing anyway');
+    }
     this.console.log('[talkback] session:', sessionId ?? '(none)');
 
     // Step 3: Open talk channel
     const payload = JSON.stringify({
       type: 'request',
       seq: 0,
-      params: { method: 'get', talk: { mode: 'half_duplex' } },
+      params: { method: 'get', talk: { mode: this.duplexMode } },
     });
     const sessionHeader = sessionId ? `Session: ${sessionId}\r\n` : '';
     const channelResp = await this.exchange(
@@ -86,6 +93,15 @@ export class TalkbackSession {
 
     if (!channelResp.includes('200')) {
       throw new Error(`Failed to open talk channel: ${channelResp.split('\r\n')[0]}`);
+    }
+
+    // Validate business-level response (camera may return 200 but with error_code != 0)
+    const bodyMatch = channelResp.match(/\r\n\r\n([\s\S]*)$/);
+    if (bodyMatch) {
+      const body = bodyMatch[1];
+      if (body.includes('"error_code"') && !body.includes('"error_code":0')) {
+        throw new Error(`Talk channel error: ${body.trim()}`);
+      }
     }
 
     // Start UDP server to receive RTP from FFmpeg
