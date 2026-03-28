@@ -1,6 +1,6 @@
 {
   "name": "@crybaby4x4/scrypted-tplink-cn-talkback",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Scrypted plugin for TP-Link IPC Chinese version cameras with two-way audio via MULTITRANS protocol",
   "keywords": [
     "scrypted-plugin",
