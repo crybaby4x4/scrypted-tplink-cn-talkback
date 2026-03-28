@@ -24,11 +24,6 @@ npm run build && npx scrypted-deploy <IP>  # 构建 + 部署
 
 本地协议验证：`node test-talkback.mjs <ip> <user> <password>`
 
-## 开发环境
-
-- Node.js 20+（nvm 管理）
-- WSL 下确保 nvm 在 PATH 前加载，避免使用 Windows 版 node
-
 ## 关键设计决策
 
 ### canMixin 条件
