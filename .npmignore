@@ -1,6 +1,9 @@
 src/
+out/
+*.tgz
 test-talkback.mjs
 webpack.config.js
 tsconfig.json
 CLAUDE.md
+CLAUDE.local.md
 .github/
