@@ -22,6 +22,7 @@ HomeKit / Scrypted UI
         └─── 话筒 ────▶ TalkbackMixin（本插件）──▶ 摄像头 TCP（MULTITRANS 直连，默认 554）
 ```
 
+| 组件 | 职责 |
 |------|------|
 | **Scrypted ONVIF 插件** | 视频流、人体检测、动作侦测、云台、快照 |
 | **本插件（TalkbackMixin）** | 双向音频：直连摄像头 MULTITRANS 协议 |
@@ -67,13 +68,14 @@ Scrypted ONVIF 设备（保留所有原有功能）
    | RTSP Port | MULTITRANS 协议端口，默认 `554` |
    | Username | 摄像头登录用户名（通常为 `admin`） |
    | Password | 摄像头登录密码 |
+   | Duplex Mode | `half_duplex`（默认）：对讲模式，说话时无法同时收听；`full_duplex`：全双工，可同时说话和收听 |
 
 5. 保存后话筒按钮即可正常使用
 
 ### 使用对讲
 
 - 在 Scrypted 或 HomeKit 中点击话筒按钮，即可向摄像头端说话
-- 为 `half_duplex` 模式，说话期间无法同时收听摄像头声音
+- 默认为 `half_duplex` 模式；如需全双工可在设置中切换为 `full_duplex`
 
 ---
 
@@ -91,7 +93,7 @@ Scrypted ONVIF 设备（保留所有原有功能）
            Session: <session_id>
 
 客户端  →  MULTITRANS ... + Session + Content-Type: application/json
-           {"type":"request","seq":0,"params":{"method":"get","talk":{"mode":"half_duplex"}}}
+           {"type":"request","seq":0,"params":{"method":"get","talk":{"mode":"half_duplex|full_duplex"}}}
 
 摄像头  →  200 OK  {"error_code":0, "session_id":"2"}
 ```
@@ -121,7 +123,7 @@ RTSP interleaved 帧格式：`$ | channel(0x01) | length(2B BE) | rtp_payload`
 
 ## 已知限制
 
-- 仅支持 `half_duplex` 模式（说话时无法同时听）
+- 部分固件仅支持 `half_duplex`，切换为 `full_duplex` 后若对讲无效，请恢复默认值
 
 ---
 
