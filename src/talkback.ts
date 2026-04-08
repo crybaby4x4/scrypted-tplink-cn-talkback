@@ -9,6 +9,94 @@ const FFMPEG_KILL_TIMEOUT_MS = 3000;
 
 export type DuplexMode = 'half_duplex' | 'full_duplex';
 
+/**
+ * Send a request over a socket and wait for the complete RTSP response (headers + optional body).
+ * Rejects on timeout, socket error, or socket close.
+ */
+function exchange(socket: net.Socket, request: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!socket || socket.destroyed) {
+      return reject(new Error('Socket not available'));
+    }
+
+    let buffer = '';
+    let settled = false;
+
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.removeListener('data', onData);
+      socket.removeListener('error', onError);
+      socket.removeListener('close', onClose);
+    };
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('MULTITRANS exchange timeout'));
+    }, EXCHANGE_TIMEOUT_MS);
+
+    const onError = (err: Error) => {
+      cleanup();
+      reject(err);
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error('Socket closed during exchange'));
+    };
+
+    const onData = (chunk: Buffer) => {
+      buffer += chunk.toString();
+
+      const headerEnd = buffer.indexOf('\r\n\r\n');
+      if (headerEnd === -1) return;
+
+      const headers = buffer.slice(0, headerEnd);
+      const contentLengthMatch = headers.match(/Content-Length:\s*(\d+)/i);
+      const contentLength = contentLengthMatch ? parseInt(contentLengthMatch[1]) : 0;
+      const bodyStart = headerEnd + 4;
+
+      if (buffer.length >= bodyStart + contentLength) {
+        cleanup();
+        resolve(buffer.slice(0, bodyStart + contentLength));
+      }
+    };
+
+    socket.on('data', onData);
+    socket.on('error', onError);
+    socket.once('close', onClose);
+    socket.write(request, (err) => {
+      if (err) {
+        cleanup();
+        reject(err);
+      }
+    });
+  });
+}
+
+/**
+ * Build the Digest Authorization header, with qop=auth support.
+ */
+function buildDigestAuth(
+  username: string,
+  password: string,
+  realm: string,
+  nonce: string,
+  qop: string,
+  method: string,
+  uri: string
+): string {
+  if (qop.includes('auth')) {
+    const cnonce = crypto.randomBytes(8).toString('hex');
+    const nc = '00000001';
+    const responseHash = computeDigestResponse(username, password, realm, nonce, method, uri, { qop: 'auth', nc, cnonce });
+    return `Digest username="${username}", realm="${realm}", nonce="${nonce}", uri="${uri}", qop=auth, nc=${nc}, cnonce="${cnonce}", response="${responseHash}"`;
+  }
+  const responseHash = computeDigestResponse(username, password, realm, nonce, method, uri);
+  return `Digest username="${username}", realm="${realm}", nonce="${nonce}", uri="${uri}", response="${responseHash}"`;
+}
+
 export class TalkbackSession {
   private socket: net.Socket | undefined;
   private ffmpegProcess: ChildProcess | undefined;
@@ -43,10 +131,11 @@ export class TalkbackSession {
     this.console.log(`[talkback] TCP connected to ${this.ip}:${this.port}`);
 
     // Step 1: Initial request (some cameras return 200 directly, others 401 for digest)
-    const r1 = await this.exchange(
+    const r1 = await exchange(
+      this.socket,
       `MULTITRANS ${uri} RTSP/1.0\r\nCSeq: ${this.cseq++}\r\nX-Client-UUID: ${clientUuid}\r\n\r\n`
     );
-    this.console.log('[talkback] step1:', r1.slice(0, 200));
+    this.console.log('[talkback] step1:', r1.slice(0, 500));
 
     let sessionId: string | undefined;
 
@@ -54,22 +143,24 @@ export class TalkbackSession {
       // Step 2: Digest auth required
       const wwwAuth = r1.match(/WWW-Authenticate:\s*Digest\s+(.+)/i)?.[1]
         ?? r1.match(/WWW-Authenticate:\s*(.+)/i)?.[1] ?? '';
-      const { realm, nonce } = parseWwwAuthenticate(wwwAuth);
+      const { realm, nonce, qop } = parseWwwAuthenticate(wwwAuth);
       if (!realm || !nonce) throw new Error('Failed to parse WWW-Authenticate challenge');
 
-      const responseHash = computeDigestResponse(
-        this.username, this.password, realm, nonce, 'MULTITRANS', uri
-      );
-      const authHeader = `Digest username="${this.username}", realm="${realm}", nonce="${nonce}", uri="${uri}", response="${responseHash}"`;
+      this.console.log(`[talkback] auth challenge — realm="${realm}" nonce="${nonce}" qop="${qop}"`);
 
-      const r2 = await this.exchange(
+      const authHeader = buildDigestAuth(this.username, this.password, realm, nonce, qop, 'MULTITRANS', uri);
+
+      const r2 = await exchange(
+        this.socket,
         `MULTITRANS ${uri} RTSP/1.0\r\nCSeq: ${this.cseq++}\r\nAuthorization: ${authHeader}\r\nX-Client-UUID: ${clientUuid}\r\n\r\n`
       );
-      this.console.log('[talkback] step2 auth:', r2.slice(0, 200));
-      if (!r2.includes('200')) throw new Error('Authentication failed');
+      this.console.log('[talkback] step2 auth:', r2.slice(0, 500));
+      if (!r2.includes('200')) throw new Error('Authentication failed (401) — check username/password');
       sessionId = r2.match(/Session:\s*([^\r\n;]+)/i)?.[1]?.trim();
     } else if (r1.includes('200')) {
       sessionId = r1.match(/Session:\s*([^\r\n;]+)/i)?.[1]?.trim();
+    } else if (r1.includes('400')) {
+      throw new Error('Camera returned 400 Bad Request — MULTITRANS not supported (check CN firmware)');
     } else {
       throw new Error(`Unexpected response: ${r1.split('\r\n')[0]}`);
     }
@@ -86,7 +177,8 @@ export class TalkbackSession {
       params: { method: 'get', talk: { mode: this.duplexMode } },
     });
     const sessionHeader = sessionId ? `Session: ${sessionId}\r\n` : '';
-    const channelResp = await this.exchange(
+    const channelResp = await exchange(
+      this.socket,
       `MULTITRANS ${uri} RTSP/1.0\r\nCSeq: ${this.cseq++}\r\n${sessionHeader}Content-Type: application/json\r\nContent-Length: ${payload.length}\r\n\r\n${payload}`
     );
     this.console.log('[talkback] channel open:', channelResp.slice(0, 300));
@@ -165,72 +257,6 @@ export class TalkbackSession {
     this.ffmpegProcess.on('exit', (code) => this.console.log('[talkback] ffmpeg exited:', code));
   }
 
-  /**
-   * Send a request and wait for the complete RTSP response (headers + optional body).
-   * Rejects on timeout, socket error, or socket close.
-   */
-  private exchange(request: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      if (!this.socket || this.socket.destroyed) {
-        return reject(new Error('Socket not available'));
-      }
-
-      let buffer = '';
-      let settled = false;
-
-      const cleanup = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        this.socket?.removeListener('data', onData);
-        this.socket?.removeListener('error', onError);
-        this.socket?.removeListener('close', onClose);
-      };
-
-      const timer = setTimeout(() => {
-        cleanup();
-        reject(new Error('MULTITRANS exchange timeout'));
-      }, EXCHANGE_TIMEOUT_MS);
-
-      const onError = (err: Error) => {
-        cleanup();
-        reject(err);
-      };
-
-      const onClose = () => {
-        cleanup();
-        reject(new Error('Socket closed during exchange'));
-      };
-
-      const onData = (chunk: Buffer) => {
-        buffer += chunk.toString();
-
-        const headerEnd = buffer.indexOf('\r\n\r\n');
-        if (headerEnd === -1) return;
-
-        const headers = buffer.slice(0, headerEnd);
-        const contentLengthMatch = headers.match(/Content-Length:\s*(\d+)/i);
-        const contentLength = contentLengthMatch ? parseInt(contentLengthMatch[1]) : 0;
-        const bodyStart = headerEnd + 4;
-
-        if (buffer.length >= bodyStart + contentLength) {
-          cleanup();
-          resolve(buffer.slice(0, bodyStart + contentLength));
-        }
-      };
-
-      this.socket.on('data', onData);
-      this.socket.on('error', onError);
-      this.socket.once('close', onClose);
-      this.socket.write(request, (err) => {
-        if (err) {
-          cleanup();
-          reject(err);
-        }
-      });
-    });
-  }
-
   stop(): void {
     this.console.log('[talkback] stopping');
 
@@ -252,5 +278,81 @@ export class TalkbackSession {
     this.udpServer = undefined;
     this.socket?.destroy();
     this.socket = undefined;
+  }
+}
+
+/**
+ * Lightweight probe: verifies TCP connectivity, MULTITRANS support, and credentials.
+ * Logs each step in detail for debugging. Does not open a full talkback session.
+ */
+export async function probeCamera(
+  ip: string,
+  port: number,
+  username: string,
+  password: string,
+  console: Console
+): Promise<string> {
+  const host = port === 554 ? ip : `${ip}:${port}`;
+  const uri = `rtsp://${host}/multitrans`;
+  const clientUuid = crypto.randomUUID();
+  const socket = new net.Socket();
+
+  try {
+    console.log(`[probe] 正在连接 ${ip}:${port} …`);
+    await new Promise<void>((resolve, reject) => {
+      socket.once('error', reject);
+      socket.connect(port, ip, () => { socket.removeAllListeners('error'); resolve(); });
+    });
+    console.log('[probe] TCP 连接成功');
+
+    // Step 1 — unauthenticated probe
+    const req1 = `MULTITRANS ${uri} RTSP/1.0\r\nCSeq: 0\r\nX-Client-UUID: ${clientUuid}\r\n\r\n`;
+    console.log('[probe] step1 发送:');
+    console.log(req1.trimEnd());
+    const r1 = await exchange(socket, req1);
+    console.log('[probe] step1 响应:');
+    console.log(r1.slice(0, 500));
+
+    if (r1.includes('200')) return '✓ 连接成功（无需认证）';
+
+    if (r1.includes('401')) {
+      const wwwAuth = r1.match(/WWW-Authenticate:\s*Digest\s+(.+)/i)?.[1]
+        ?? r1.match(/WWW-Authenticate:\s*(.+)/i)?.[1] ?? '';
+      const { realm, nonce, qop } = parseWwwAuthenticate(wwwAuth);
+      console.log(`[probe] 认证挑战 — realm="${realm}" nonce="${nonce}" qop="${qop}"`);
+
+      if (!realm || !nonce) {
+        console.log('[probe] 无法解析 WWW-Authenticate 头');
+        return '✗ 无法解析认证挑战';
+      }
+
+      const authHeader = buildDigestAuth(username, password, realm, nonce, qop, 'MULTITRANS', uri);
+      if (qop.includes('auth')) {
+        console.log('[probe] 使用 qop=auth');
+      } else {
+        console.log('[probe] 使用简单 Digest（无 qop）');
+      }
+
+      const req2 = `MULTITRANS ${uri} RTSP/1.0\r\nCSeq: 1\r\nAuthorization: ${authHeader}\r\nX-Client-UUID: ${clientUuid}\r\n\r\n`;
+      console.log('[probe] step2 发送:');
+      console.log(req2.trimEnd());
+      const r2 = await exchange(socket, req2);
+      console.log('[probe] step2 响应:');
+      console.log(r2.slice(0, 500));
+
+      if (r2.includes('200')) return '✓ 连接成功，认证通过';
+      if (r2.includes('401')) return '✗ 认证失败 — 请检查用户名/密码';
+      return `✗ step2 意外响应：${r2.split('\r\n')[0]}`;
+    }
+
+    if (r1.includes('400')) return '✗ 摄像头返回 400 — 不支持 MULTITRANS 协议（请确认是否为中国版固件）';
+    return `✗ 意外响应：${r1.split('\r\n')[0]}`;
+
+  } catch (e: any) {
+    console.log(`[probe] 错误：${(e as Error).message}`);
+    return `✗ 连接失败：${(e as Error).message}`;
+  } finally {
+    socket.destroy();
+    console.log('[probe] socket 已关闭');
   }
 }

@@ -8,7 +8,7 @@ import sdk, {
   SettingValue,
   WritableDeviceState,
 } from '@scrypted/sdk';
-import { DuplexMode, TalkbackSession } from './talkback';
+import { DuplexMode, TalkbackSession, probeCamera } from './talkback';
 
 const { mediaManager } = sdk;
 
@@ -110,6 +110,20 @@ export class TalkbackMixin extends MixinDeviceBase<any> implements Intercom {
         value: this.duplexMode,
         choices: ['half_duplex', 'full_duplex'],
       },
+      {
+        key: 'talkback:testConnection',
+        group: 'TP-Link Talkback',
+        title: 'Test Connection',
+        description: '点击以验证摄像头连通性和账号密码是否正确，结果输出到控制台日志',
+        type: 'button',
+      } as Setting,
+      {
+        key: 'talkback:testResult',
+        group: 'TP-Link Talkback',
+        title: 'Last Test Result',
+        value: this.storage.getItem('testResult') ?? '(not tested yet)',
+        readonly: true,
+      } as Setting,
     ];
 
     return [...deviceSettings, ...talkbackSettings];
@@ -117,7 +131,21 @@ export class TalkbackMixin extends MixinDeviceBase<any> implements Intercom {
 
   async putSetting(key: string, value: SettingValue): Promise<void> {
     if (key.startsWith('talkback:')) {
-      this.storage.setItem(key.slice('talkback:'.length), value?.toString() ?? '');
+      const subkey = key.slice('talkback:'.length);
+
+      if (subkey === 'testConnection') {
+        if (!this.ip) {
+          this.storage.setItem('testResult', '✗ 未配置摄像头 IP');
+          return;
+        }
+        this.console.log('[talkback] 开始测试连接…');
+        const result = await probeCamera(this.ip, this.port, this.username, this.password, this.console);
+        this.console.log('[talkback] 测试结果：', result);
+        this.storage.setItem('testResult', result);
+        return;
+      }
+
+      this.storage.setItem(subkey, value?.toString() ?? '');
     } else {
       await this.mixinDevice.putSetting?.(key, value);
     }
