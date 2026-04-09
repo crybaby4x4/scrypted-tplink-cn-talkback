@@ -10,6 +10,28 @@ const FFMPEG_KILL_TIMEOUT_MS = 3000;
 export type DuplexMode = 'half_duplex' | 'full_duplex';
 
 /**
+ * A Digest computation variant: the (method, uri) pair used in HA2 and the
+ * Authorization header. Different TP-Link firmware versions expect different
+ * combinations, so we try several before giving up on 401.
+ */
+interface AuthVariant {
+  label: string;
+  digestMethod: string;   // method string used in HA2
+  digestUriMode: 'absolute' | 'path';  // URI form used in HA2 and Authorization header
+}
+
+const AUTH_VARIANTS: AuthVariant[] = [
+  { label: '默认 (HA2 method=MULTITRANS, uri=绝对)',   digestMethod: 'MULTITRANS', digestUriMode: 'absolute' },
+  { label: '回退1 (HA2 method=DESCRIBE, uri=绝对)',     digestMethod: 'DESCRIBE',   digestUriMode: 'absolute' },
+  { label: '回退2 (HA2 method=MULTITRANS, uri=路径)',   digestMethod: 'MULTITRANS', digestUriMode: 'path' },
+  { label: '回退3 (HA2 method=DESCRIBE, uri=路径)',     digestMethod: 'DESCRIBE',   digestUriMode: 'path' },
+];
+
+function variantDigestUri(host: string, mode: 'absolute' | 'path'): string {
+  return mode === 'absolute' ? `rtsp://${host}/multitrans` : '/multitrans';
+}
+
+/**
  * Send a request over a socket and wait for the complete RTSP response (headers + optional body).
  * Rejects on timeout, socket error, or socket close.
  */
@@ -97,6 +119,83 @@ function buildDigestAuth(
   return `Digest username="${username}", realm="${realm}", nonce="${nonce}", uri="${uri}", response="${responseHash}"`;
 }
 
+type HandshakeResult =
+  | { status: 'ok'; sessionId?: string; cseq: number }
+  | { status: 'unauthorized' }
+  | { status: 'unsupported' };
+
+/**
+ * Performs MULTITRANS step 1 (unauth probe) and step 2 (digest auth if challenged) on an
+ * already-connected socket. The request line URI is always the absolute form, which is what
+ * the camera's RTSP parser expects; only the Digest HA2 inputs vary per variant.
+ *
+ * Returns:
+ *   - 'ok'            — authed (or no auth needed), socket is ready for step 3
+ *   - 'unauthorized'  — 401 after sending credentials, caller should try another variant
+ *   - 'unsupported'   — camera returned 400 (MULTITRANS not supported)
+ * Throws on parse/network errors.
+ */
+async function attemptHandshake(
+  socket: net.Socket,
+  host: string,
+  username: string,
+  password: string,
+  digestMethod: string,
+  digestUri: string,
+  clientUuid: string,
+  console: Console,
+  logPrefix: string,
+): Promise<HandshakeResult> {
+  const requestUri = `rtsp://${host}/multitrans`;
+  let cseq = 0;
+
+  // Step 1: unauthenticated MULTITRANS request
+  const req1 = `MULTITRANS ${requestUri} RTSP/1.0\r\nCSeq: ${cseq++}\r\nX-Client-UUID: ${clientUuid}\r\n\r\n`;
+  const r1 = await exchange(socket, req1);
+  console.log(`${logPrefix} step1:`);
+  console.log(r1.slice(0, 500));
+
+  if (r1.includes('200')) {
+    const sessionId = r1.match(/Session:\s*([^\r\n;]+)/i)?.[1]?.trim();
+    return { status: 'ok', sessionId, cseq };
+  }
+  if (r1.includes('400')) return { status: 'unsupported' };
+  if (!r1.includes('401')) throw new Error(`Unexpected step1 response: ${r1.split('\r\n')[0]}`);
+
+  // Step 2: parse WWW-Authenticate challenge and retry with Digest
+  const wwwAuth = r1.match(/WWW-Authenticate:\s*Digest\s+(.+)/i)?.[1]
+    ?? r1.match(/WWW-Authenticate:\s*(.+)/i)?.[1] ?? '';
+  const { realm, nonce, qop } = parseWwwAuthenticate(wwwAuth);
+  if (!realm || !nonce) throw new Error('Failed to parse WWW-Authenticate challenge');
+
+  console.log(`${logPrefix} 挑战 — realm="${realm}" nonce="${nonce}" qop="${qop || '(none)'}"`);
+  console.log(`${logPrefix} HA2 method="${digestMethod}" uri="${digestUri}"${qop.includes('auth') ? ' qop=auth' : ''}`);
+
+  const authHeader = buildDigestAuth(username, password, realm, nonce, qop, digestMethod, digestUri);
+  const req2 = `MULTITRANS ${requestUri} RTSP/1.0\r\nCSeq: ${cseq++}\r\nAuthorization: ${authHeader}\r\nX-Client-UUID: ${clientUuid}\r\n\r\n`;
+  const r2 = await exchange(socket, req2);
+  console.log(`${logPrefix} step2:`);
+  console.log(r2.slice(0, 500));
+
+  if (r2.includes('200')) {
+    const sessionId = r2.match(/Session:\s*([^\r\n;]+)/i)?.[1]?.trim();
+    return { status: 'ok', sessionId, cseq };
+  }
+  if (r2.includes('401')) return { status: 'unauthorized' };
+  throw new Error(`Unexpected step2 response: ${r2.split('\r\n')[0]}`);
+}
+
+function connectSocket(ip: string, port: number): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = new net.Socket();
+    socket.once('error', reject);
+    socket.connect(port, ip, () => {
+      socket.removeAllListeners('error');
+      resolve(socket);
+    });
+  });
+}
+
 export class TalkbackSession {
   private socket: net.Socket | undefined;
   private ffmpegProcess: ChildProcess | undefined;
@@ -114,56 +213,63 @@ export class TalkbackSession {
 
   async start(ffmpegInputArgs: string[]): Promise<void> {
     const host = this.port === 554 ? this.ip : `${this.ip}:${this.port}`;
-    const uri = `rtsp://${host}/multitrans`;
+    const requestUri = `rtsp://${host}/multitrans`;
     const clientUuid = crypto.randomUUID();
 
-    this.socket = new net.Socket();
-
-    // Connect TCP to camera RTSP port
-    await new Promise<void>((resolve, reject) => {
-      const onError = (err: Error) => reject(err);
-      this.socket!.once('error', onError);
-      this.socket!.connect(this.port, this.ip, () => {
-        this.socket!.removeListener('error', onError);
-        resolve();
-      });
-    });
-    this.console.log(`[talkback] TCP connected to ${this.ip}:${this.port}`);
-
-    // Step 1: Initial request (some cameras return 200 directly, others 401 for digest)
-    const r1 = await exchange(
-      this.socket,
-      `MULTITRANS ${uri} RTSP/1.0\r\nCSeq: ${this.cseq++}\r\nX-Client-UUID: ${clientUuid}\r\n\r\n`
-    );
-    this.console.log('[talkback] step1:', r1.slice(0, 500));
-
+    // Try each Digest variant on a fresh socket. On first success, keep that socket
+    // and proceed with step 3.
+    let authedSocket: net.Socket | undefined;
     let sessionId: string | undefined;
+    let cseq = 0;
+    const failedVariants: string[] = [];
 
-    if (r1.includes('401')) {
-      // Step 2: Digest auth required
-      const wwwAuth = r1.match(/WWW-Authenticate:\s*Digest\s+(.+)/i)?.[1]
-        ?? r1.match(/WWW-Authenticate:\s*(.+)/i)?.[1] ?? '';
-      const { realm, nonce, qop } = parseWwwAuthenticate(wwwAuth);
-      if (!realm || !nonce) throw new Error('Failed to parse WWW-Authenticate challenge');
+    for (let i = 0; i < AUTH_VARIANTS.length; i++) {
+      const variant = AUTH_VARIANTS[i];
+      const digestUri = variantDigestUri(host, variant.digestUriMode);
+      this.console.log(`[talkback] 尝试变体 ${i + 1}/${AUTH_VARIANTS.length}: ${variant.label}`);
 
-      this.console.log(`[talkback] auth challenge — realm="${realm}" nonce="${nonce}" qop="${qop}"`);
+      let socket: net.Socket | undefined;
+      try {
+        socket = await connectSocket(this.ip, this.port);
+        this.console.log(`[talkback] TCP connected to ${this.ip}:${this.port}`);
 
-      const authHeader = buildDigestAuth(this.username, this.password, realm, nonce, qop, 'MULTITRANS', uri);
+        const result = await attemptHandshake(
+          socket, host, this.username, this.password,
+          variant.digestMethod, digestUri, clientUuid, this.console, '[talkback]'
+        );
 
-      const r2 = await exchange(
-        this.socket,
-        `MULTITRANS ${uri} RTSP/1.0\r\nCSeq: ${this.cseq++}\r\nAuthorization: ${authHeader}\r\nX-Client-UUID: ${clientUuid}\r\n\r\n`
-      );
-      this.console.log('[talkback] step2 auth:', r2.slice(0, 500));
-      if (!r2.includes('200')) throw new Error('Authentication failed (401) — check username/password');
-      sessionId = r2.match(/Session:\s*([^\r\n;]+)/i)?.[1]?.trim();
-    } else if (r1.includes('200')) {
-      sessionId = r1.match(/Session:\s*([^\r\n;]+)/i)?.[1]?.trim();
-    } else if (r1.includes('400')) {
-      throw new Error('Camera returned 400 Bad Request — MULTITRANS not supported (check CN firmware)');
-    } else {
-      throw new Error(`Unexpected response: ${r1.split('\r\n')[0]}`);
+        if (result.status === 'ok') {
+          authedSocket = socket;
+          sessionId = result.sessionId;
+          cseq = result.cseq;
+          this.console.log(`[talkback] ✓ 握手成功，使用 ${variant.label}`);
+          break;
+        }
+        if (result.status === 'unsupported') {
+          socket.destroy();
+          throw new Error('Camera returned 400 — MULTITRANS not supported (check CN firmware)');
+        }
+        // unauthorized — try next variant
+        failedVariants.push(variant.label);
+        socket.destroy();
+      } catch (e) {
+        if (socket) socket.destroy();
+        // First variant network/parse error = fatal; further variants won't help
+        if (i === 0) throw e;
+        // For subsequent variants, record and continue
+        failedVariants.push(`${variant.label} (${(e as Error).message})`);
+      }
     }
+
+    if (!authedSocket) {
+      throw new Error(
+        `所有 Digest 变体均认证失败 (401)：${failedVariants.join('; ')}。` +
+        `请检查 RTSP 本地账号密码（TP-Link CN 版通常与云账号密码不同）`
+      );
+    }
+
+    this.socket = authedSocket;
+    this.cseq = cseq;
 
     if (!sessionId) {
       this.console.warn('[talkback] no session ID in response, continuing anyway');
@@ -179,7 +285,7 @@ export class TalkbackSession {
     const sessionHeader = sessionId ? `Session: ${sessionId}\r\n` : '';
     const channelResp = await exchange(
       this.socket,
-      `MULTITRANS ${uri} RTSP/1.0\r\nCSeq: ${this.cseq++}\r\n${sessionHeader}Content-Type: application/json\r\nContent-Length: ${payload.length}\r\n\r\n${payload}`
+      `MULTITRANS ${requestUri} RTSP/1.0\r\nCSeq: ${this.cseq++}\r\n${sessionHeader}Content-Type: application/json\r\nContent-Length: ${payload.length}\r\n\r\n${payload}`
     );
     this.console.log('[talkback] channel open:', channelResp.slice(0, 300));
 
@@ -283,7 +389,9 @@ export class TalkbackSession {
 
 /**
  * Lightweight probe: verifies TCP connectivity, MULTITRANS support, and credentials.
- * Logs each step in detail for debugging. Does not open a full talkback session.
+ * Iterates through each Digest variant on a fresh TCP connection, logs every step in
+ * detail, and reports which variant (if any) succeeded. Does not open a full talkback
+ * session — stops at step 2 (auth).
  */
 export async function probeCamera(
   ip: string,
@@ -293,66 +401,46 @@ export async function probeCamera(
   console: Console
 ): Promise<string> {
   const host = port === 554 ? ip : `${ip}:${port}`;
-  const uri = `rtsp://${host}/multitrans`;
-  const clientUuid = crypto.randomUUID();
-  const socket = new net.Socket();
+  console.log(`[probe] 开始探测 ${ip}:${port}（共 ${AUTH_VARIANTS.length} 个 Digest 变体）`);
 
-  try {
-    console.log(`[probe] 正在连接 ${ip}:${port} …`);
-    await new Promise<void>((resolve, reject) => {
-      socket.once('error', reject);
-      socket.connect(port, ip, () => { socket.removeAllListeners('error'); resolve(); });
-    });
-    console.log('[probe] TCP 连接成功');
+  const attempted: string[] = [];
 
-    // Step 1 — unauthenticated probe
-    const req1 = `MULTITRANS ${uri} RTSP/1.0\r\nCSeq: 0\r\nX-Client-UUID: ${clientUuid}\r\n\r\n`;
-    console.log('[probe] step1 发送:');
-    console.log(req1.trimEnd());
-    const r1 = await exchange(socket, req1);
-    console.log('[probe] step1 响应:');
-    console.log(r1.slice(0, 500));
+  for (let i = 0; i < AUTH_VARIANTS.length; i++) {
+    const variant = AUTH_VARIANTS[i];
+    const digestUri = variantDigestUri(host, variant.digestUriMode);
+    console.log('');
+    console.log(`[probe] ─── 变体 ${i + 1}/${AUTH_VARIANTS.length}: ${variant.label} ───`);
 
-    if (r1.includes('200')) return '✓ 连接成功（无需认证）';
+    let socket: net.Socket | undefined;
+    try {
+      socket = await connectSocket(ip, port);
+      console.log('[probe] TCP 已连接');
 
-    if (r1.includes('401')) {
-      const wwwAuth = r1.match(/WWW-Authenticate:\s*Digest\s+(.+)/i)?.[1]
-        ?? r1.match(/WWW-Authenticate:\s*(.+)/i)?.[1] ?? '';
-      const { realm, nonce, qop } = parseWwwAuthenticate(wwwAuth);
-      console.log(`[probe] 认证挑战 — realm="${realm}" nonce="${nonce}" qop="${qop}"`);
+      const result = await attemptHandshake(
+        socket, host, username, password,
+        variant.digestMethod, digestUri, crypto.randomUUID(), console, '[probe]'
+      );
 
-      if (!realm || !nonce) {
-        console.log('[probe] 无法解析 WWW-Authenticate 头');
-        return '✗ 无法解析认证挑战';
+      if (result.status === 'ok') {
+        console.log(`[probe] ✓ 成功 — ${variant.label}`);
+        return `✓ 连接成功 — ${variant.label}${result.sessionId ? ` (session=${result.sessionId})` : ''}`;
       }
-
-      const authHeader = buildDigestAuth(username, password, realm, nonce, qop, 'MULTITRANS', uri);
-      if (qop.includes('auth')) {
-        console.log('[probe] 使用 qop=auth');
-      } else {
-        console.log('[probe] 使用简单 Digest（无 qop）');
+      if (result.status === 'unsupported') {
+        return '✗ 摄像头返回 400 — 不支持 MULTITRANS 协议（请确认是否为中国版固件）';
       }
-
-      const req2 = `MULTITRANS ${uri} RTSP/1.0\r\nCSeq: 1\r\nAuthorization: ${authHeader}\r\nX-Client-UUID: ${clientUuid}\r\n\r\n`;
-      console.log('[probe] step2 发送:');
-      console.log(req2.trimEnd());
-      const r2 = await exchange(socket, req2);
-      console.log('[probe] step2 响应:');
-      console.log(r2.slice(0, 500));
-
-      if (r2.includes('200')) return '✓ 连接成功，认证通过';
-      if (r2.includes('401')) return '✗ 认证失败 — 请检查用户名/密码';
-      return `✗ step2 意外响应：${r2.split('\r\n')[0]}`;
+      console.log(`[probe] ✗ 401 被拒`);
+      attempted.push(variant.label);
+    } catch (e) {
+      console.log(`[probe] ✗ 异常: ${(e as Error).message}`);
+      if (i === 0) {
+        // First variant failing with a network/parse error usually means nothing else will work
+        return `✗ 连接失败：${(e as Error).message}`;
+      }
+      attempted.push(`${variant.label} (${(e as Error).message})`);
+    } finally {
+      socket?.destroy();
     }
-
-    if (r1.includes('400')) return '✗ 摄像头返回 400 — 不支持 MULTITRANS 协议（请确认是否为中国版固件）';
-    return `✗ 意外响应：${r1.split('\r\n')[0]}`;
-
-  } catch (e: any) {
-    console.log(`[probe] 错误：${(e as Error).message}`);
-    return `✗ 连接失败：${(e as Error).message}`;
-  } finally {
-    socket.destroy();
-    console.log('[probe] socket 已关闭');
   }
+
+  return `✗ 所有 ${AUTH_VARIANTS.length} 个 Digest 变体均被拒绝（401）— 请确认使用的是本地设备账号密码（TP-Link CN 版摄像头的本地账号通常与云/App 账号不同），或与 ONVIF 使用同一账号`;
 }
