@@ -114,7 +114,7 @@ export class TalkbackMixin extends MixinDeviceBase<any> implements Intercom {
         key: 'talkback:testConnection',
         group: 'TP-Link Talkback',
         title: 'Test Connection',
-        description: '点击以验证摄像头连通性和账号密码是否正确，结果输出到控制台日志',
+        description: '点击按钮验证连通性和账号密码，详细日志输出到控制台',
         type: 'button',
       } as Setting,
       {
