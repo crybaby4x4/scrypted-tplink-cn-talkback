@@ -6,7 +6,7 @@ import sdk, {
   Setting,
   SettingValue,
 } from '@scrypted/sdk';
-import { SettingsMixinDeviceBase } from '@scrypted/sdk/dist/src/settings-mixin';
+import { SettingsMixinDeviceBase } from '@scrypted/sdk/settings-mixin';
 import { DuplexMode, TalkbackSession, probeCamera } from './talkback';
 
 const { mediaManager } = sdk;

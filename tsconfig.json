@@ -7,7 +7,12 @@
     "outDir": "dist",
     "strict": true,
     "esModuleInterop": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@scrypted/sdk/settings-mixin": ["node_modules/@scrypted/sdk/dist/src/settings-mixin"],
+      "@scrypted/sdk/storage-settings": ["node_modules/@scrypted/sdk/dist/src/storage-settings"]
+    }
   },
   "include": ["src"]
 }

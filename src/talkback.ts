@@ -21,10 +21,10 @@ interface AuthVariant {
 }
 
 const AUTH_VARIANTS: AuthVariant[] = [
-  { label: '默认 (HA2 method=MULTITRANS, uri=绝对)',   digestMethod: 'MULTITRANS', digestUriMode: 'absolute' },
-  { label: '回退1 (HA2 method=DESCRIBE, uri=绝对)',     digestMethod: 'DESCRIBE',   digestUriMode: 'absolute' },
-  { label: '回退2 (HA2 method=MULTITRANS, uri=路径)',   digestMethod: 'MULTITRANS', digestUriMode: 'path' },
-  { label: '回退3 (HA2 method=DESCRIBE, uri=路径)',     digestMethod: 'DESCRIBE',   digestUriMode: 'path' },
+  { label: '默认 (method=MULTITRANS, 完整URI)',   digestMethod: 'MULTITRANS', digestUriMode: 'absolute' },
+  { label: '回退1 (method=DESCRIBE, 完整URI)',     digestMethod: 'DESCRIBE',   digestUriMode: 'absolute' },
+  { label: '回退2 (method=MULTITRANS, 路径URI)',   digestMethod: 'MULTITRANS', digestUriMode: 'path' },
+  { label: '回退3 (method=DESCRIBE, 路径URI)',     digestMethod: 'DESCRIBE',   digestUriMode: 'path' },
 ];
 
 function variantDigestUri(host: string, mode: 'absolute' | 'path'): string {
@@ -422,8 +422,8 @@ export async function probeCamera(
       );
 
       if (result.status === 'ok') {
-        console.log(`[probe] ✓ 成功 — ${variant.label}`);
-        return `✓ 连接成功 — ${variant.label}${result.sessionId ? ` (session=${result.sessionId})` : ''}`;
+        console.log(`[probe] ✓ 成功 — 认证方式: ${variant.label}`);
+        return `✓ 网络连通、认证通过（认证方式: ${variant.label}）`;
       }
       if (result.status === 'unsupported') {
         return '✗ 摄像头返回 400 — 不支持 MULTITRANS 协议（请确认是否为中国版固件）';
