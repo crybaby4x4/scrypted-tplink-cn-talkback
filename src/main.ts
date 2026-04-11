@@ -27,12 +27,12 @@ class TpLinkTalkbackProvider implements MixinProvider {
     mixinDeviceInterfaces: ScryptedInterface[],
     mixinDeviceState: WritableDeviceState,
   ): Promise<TalkbackMixin> {
-    return new TalkbackMixin(
+    return new TalkbackMixin({
       mixinDevice,
       mixinDeviceInterfaces,
       mixinDeviceState,
-      undefined,
-    );
+      mixinProviderNativeId: undefined,
+    });
   }
 
   // Called when the mixin is disabled or the device is removed.
